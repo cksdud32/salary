@@ -3,13 +3,13 @@
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="월급시계" Width="410" Height="246" MinWidth="340" MinHeight="220"
+        Title="월급시계" Width="410" Height="278" MinWidth="340" MinHeight="250"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         Topmost="True" ResizeMode="CanResizeWithGrip" ShowInTaskbar="True">
   <Border CornerRadius="22" Background="#F20B1014" BorderBrush="#2D3942" BorderThickness="1" Padding="20">
     <Border.Effect><DropShadowEffect BlurRadius="28" ShadowDepth="7" Opacity="0.52" Color="#000000"/></Border.Effect>
     <Grid>
-      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
       <Grid Grid.Row="0" Name="DragBar" Background="Transparent">
         <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
@@ -36,7 +36,13 @@
           <Grid HorizontalAlignment="Left" Name="ProgressFill" Background="#54DB96" Width="0"/>
         </Border>
       </StackPanel>
-      <TextBlock Grid.Row="2" Text="실제 입금액이 아닌 참고용 추정치 · v1.3" Foreground="#59666E" FontSize="10" HorizontalAlignment="Center" Margin="0,9,0,0"/>
+      <Border Grid.Row="2" Background="#141B20" BorderBrush="#253139" BorderThickness="1" CornerRadius="10" Padding="11,8" Margin="0,7,0,0">
+        <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <StackPanel><TextBlock Text="이번 달 누적 예상 급여" Foreground="#9AA7AE" FontSize="11"/><TextBlock Name="MonthlyBasisText" Text="월말 예상액 계산 중" Foreground="#59666E" FontSize="9" Margin="0,2,0,0"/></StackPanel>
+          <StackPanel Grid.Column="1" Name="MonthlyDigitsPanel" Orientation="Horizontal" Height="25" VerticalAlignment="Center"/>
+        </Grid>
+      </Border>
+      <TextBlock Grid.Row="3" Text="실제 입금액이 아닌 참고용 추정치 · v1.8" Foreground="#59666E" FontSize="10" HorizontalAlignment="Center" Margin="0,8,0,0"/>
     </Grid>
   </Border>
 </Window>
@@ -49,6 +55,8 @@ $statusText = $window.FindName('StatusText')
 $percentText = $window.FindName('PercentText')
 $remainText = $window.FindName('RemainText')
 $progressFill = $window.FindName('ProgressFill')
+$monthlyDigitsPanel = $window.FindName('MonthlyDigitsPanel')
+$monthlyBasisText = $window.FindName('MonthlyBasisText')
 $dragBar = $window.FindName('DragBar')
 $settingsButton = $window.FindName('SettingsButton')
 $minButton = $window.FindName('MinButton')
@@ -56,7 +64,7 @@ $closeButton = $window.FindName('CloseButton')
 
 $configDir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'SalaryClock'
 $configPath = Join-Path $configDir 'settings.json'
-$defaults = [ordered]@{ Hourly = 12000; Start = '09:30'; End = '17:00'; BreakStart = '12:30'; BreakEnd = '13:30' }
+$defaults = [ordered]@{ Hourly = 12000; Start = '09:30'; End = '17:00'; BreakStart = '12:30'; BreakEnd = '13:30'; WorkDays = 'Monday,Tuesday,Wednesday,Thursday,Friday'; MonthlyWorkdays = ''; MonthlyWorkdaysMonth = '' }
 $script:config = [ordered]@{}
 
 function Load-Config {
@@ -74,6 +82,20 @@ function Duration-Text([double]$minutes) {
   $m = [Math]::Max(0, [Math]::Ceiling($minutes)); $h = [Math]::Floor($m / 60); $r = $m % 60
   if ($h -gt 0) { if ($r -gt 0) { return "${h}시간 ${r}분" }; return "${h}시간" }; return "${r}분"
 }
+function Get-MonthWorkdayCount {
+  $today = Get-Date; $monthKey = $today.ToString('yyyy-MM')
+  if ($script:config.MonthlyWorkdaysMonth -eq $monthKey -and "$($script:config.MonthlyWorkdays)" -match '^\d+$') { return [int]$script:config.MonthlyWorkdays }
+  $first = Get-Date -Year $today.Year -Month $today.Month -Day 1
+  $selected = @($script:config.WorkDays -split ','); $days = [DateTime]::DaysInMonth($today.Year,$today.Month); $count = 0
+  for ($day=0; $day -lt $days; $day++) { $date=$first.AddDays($day); if ($selected -contains $date.DayOfWeek.ToString()) { $count++ } }
+  return $count
+}
+function Get-CompletedWorkdayCount {
+  $today = (Get-Date).Date; $first = Get-Date -Year $today.Year -Month $today.Month -Day 1
+  $selected = @($script:config.WorkDays -split ','); $count = 0
+  for ($date=$first; $date -lt $today; $date=$date.AddDays(1)) { if ($selected -contains $date.DayOfWeek.ToString()) { $count++ } }
+  return $count
+}
 function Get-WorkState {
   $now = Get-Date; $nowMin = $now.Hour * 60 + $now.Minute + $now.Second / 60.0 + $now.Millisecond / 60000.0
   [double]$start = Minutes $script:config.Start; [double]$end = Minutes $script:config.End; [double]$bs = Minutes $script:config.BreakStart; [double]$be = Minutes $script:config.BreakEnd
@@ -83,14 +105,17 @@ function Get-WorkState {
   [double]$breakElapsed = [Math]::Max(0.0, [Math]::Min($clampedNow, $be) - [Math]::Max($start, $bs))
   [double]$elapsed = [Math]::Max(0.0, [Math]::Min($total, $raw - $breakElapsed)); [double]$progress = if ($total -gt 0) { $elapsed / $total } else { 0.0 }
   $daily = [double]$script:config.Hourly * $total / 60.0; $earned = $daily * $progress
-  if ($nowMin -ge $end) { $status = '오늘 근무 완료'; $remaining = '퇴근 완료' }
+  $isWorkday = @($script:config.WorkDays -split ',') -contains $now.DayOfWeek.ToString()
+  if (!$isWorkday) { $earned = 0.0; $progress = 0.0; $status = '오늘은 출근 없는 날'; $remaining = '다음 출근일에 시작' }
+  elseif ($nowMin -ge $end) { $status = '오늘 근무 완료'; $remaining = '퇴근 완료' }
   elseif ($nowMin -ge $bs -and $nowMin -lt $be) { $status = '휴게 중'; $remaining = "$(Duration-Text ($end-$nowMin)) 후 퇴근" }
   elseif ($nowMin -ge $start) { $status = '근무 중'; $remaining = "$(Duration-Text ($end-$nowMin)) 후 퇴근" }
   else { $status = '근무 전'; $remaining = '근무 전' }
-  return [pscustomobject]@{ Earned=$earned; Progress=$progress; Status=$status; Remaining=$remaining }
+  return [pscustomobject]@{ Earned=$earned; Daily=$daily; Progress=$progress; Status=$status; Remaining=$remaining }
 }
 
 $script:previousMoney = ''
+$script:previousMonthly = ''
 $script:lastDisplaySecond = ''
 function New-DigitText([string]$char) {
   $text = New-Object Windows.Controls.TextBlock
@@ -120,43 +145,62 @@ function Update-RollingMoney([double]$amount) {
   }
   $script:previousMoney = $value
 }
+function New-MonthDigitText([string]$char) {
+  $text = New-Object Windows.Controls.TextBlock; $text.Text=$char; $text.FontFamily=New-Object Windows.Media.FontFamily('Cascadia Mono, Consolas'); $text.FontSize=17; $text.FontWeight='Bold'; $text.Foreground='#DDF9E9'; $text.HorizontalAlignment='Center'; $text.VerticalAlignment='Center'; $text.TextAlignment='Center'; return $text
+}
+function Update-RollingMonthly([double]$amount) {
+  $value='₩'+([Math]::Floor($amount)).ToString('N0'); if($value -eq $script:previousMonthly){return}; $oldValue=$script:previousMonthly; $monthlyDigitsPanel.Children.Clear()
+  for($i=0;$i -lt $value.Length;$i++){
+    $ch=$value.Substring($i,1); $oldCh=if($i -lt $oldValue.Length){$oldValue.Substring($i,1)}else{''}; $cell=New-Object Windows.Controls.Grid; $cell.Height=25; $cell.Width=if($ch -eq ','){7}elseif($ch -eq '₩'){14}else{11}; $cell.ClipToBounds=$true; $newText=New-MonthDigitText $ch
+    if($oldCh -ne '' -and $oldCh -ne $ch -and $ch -match '[0-9]'){$oldText=New-MonthDigitText $oldCh;$oldTransform=New-Object Windows.Media.TranslateTransform;$oldText.RenderTransform=$oldTransform;$newTransform=New-Object Windows.Media.TranslateTransform;$newTransform.Y=25;$newText.RenderTransform=$newTransform;$cell.Children.Add($oldText)|Out-Null;$cell.Children.Add($newText)|Out-Null;$ease=New-Object Windows.Media.Animation.SineEase;$ease.EasingMode='EaseInOut';$oldAnim=New-Object Windows.Media.Animation.DoubleAnimation(0,-25,[TimeSpan]::FromMilliseconds(820));$oldAnim.EasingFunction=$ease;$newAnim=New-Object Windows.Media.Animation.DoubleAnimation(25,0,[TimeSpan]::FromMilliseconds(820));$newAnim.EasingFunction=$ease;$oldTransform.BeginAnimation([Windows.Media.TranslateTransform]::YProperty,$oldAnim);$newTransform.BeginAnimation([Windows.Media.TranslateTransform]::YProperty,$newAnim)}else{$cell.Children.Add($newText)|Out-Null};$monthlyDigitsPanel.Children.Add($cell)|Out-Null
+  }; $script:previousMonthly=$value
+}
 function Refresh-UI {
   $state = Get-WorkState
   $secondKey = (Get-Date).ToString('yyyyMMddHHmmss')
+  $displayTick = $false
   if ($secondKey -ne $script:lastDisplaySecond) {
     $script:lastDisplaySecond = $secondKey
+    $displayTick = $true
     Update-RollingMoney $state.Earned
   }
   $statusText.Text = $state.Status; $percentText.Text = "{0}%" -f [Math]::Round($state.Progress*100); $remainText.Text = $state.Remaining
+  $workdays = Get-MonthWorkdayCount; $completedDays = [Math]::Min((Get-CompletedWorkdayCount),$workdays); $monthlyTotal = $state.Daily * $workdays; $monthlyAccrued = [Math]::Min($monthlyTotal, $state.Daily * $completedDays + $state.Earned); if($displayTick){Update-RollingMonthly $monthlyAccrued}; $manualMonth=((Get-Date).ToString('yyyy-MM') -eq $script:config.MonthlyWorkdaysMonth -and "$($script:config.MonthlyWorkdays)" -match '^\d+$'); $basis=if($manualMonth){"직접 설정 ${workdays}일"}else{"선택 요일 ${workdays}일"}; $monthlyBasisText.Text = "$basis · 월말 예상 ₩$(([Math]::Round($monthlyTotal)).ToString('N0'))"
   $maxWidth = [Math]::Max(0,$window.ActualWidth-46); $progressFill.Width = $maxWidth * $state.Progress
   $statusText.Foreground = if ($state.Status -eq '휴게 중') { '#F7C66B' } elseif ($state.Status -eq '근무 전') { '#87959E' } else { '#72DCA2' }
 }
 
 function Show-Settings {
   [xml]$settingsXaml = @'
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Title="근무 설정" Width="360" Height="430" WindowStartupLocation="CenterOwner" ResizeMode="NoResize" Background="#10161B" Foreground="#F3F7F5">
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Title="근무 설정" Width="380" Height="570" WindowStartupLocation="CenterOwner" ResizeMode="NoResize" Background="#10161B" Foreground="#F3F7F5">
  <Grid Margin="24"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
   <StackPanel><TextBlock Text="근무 설정" FontSize="21" FontWeight="Bold"/><TextBlock Text="비콘 기록과 다르면 인정 시간을 직접 맞춰 주세요." Foreground="#8F9CA5" FontSize="11" Margin="0,6,0,18"/></StackPanel>
-  <Grid Grid.Row="1"><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions><Grid.RowDefinitions><RowDefinition/><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
+  <Grid Grid.Row="1"><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="12"/><ColumnDefinition/></Grid.ColumnDefinitions><Grid.RowDefinitions><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
    <StackPanel Grid.ColumnSpan="3"><TextBlock Text="시급 (원)" Margin="0,0,0,6"/><TextBox Name="HourlyBox" Height="35" Padding="9,6" Background="#0A0F13" Foreground="White" BorderBrush="#35424C"/></StackPanel>
    <StackPanel Grid.Row="1"><TextBlock Text="출근 시각" Margin="0,12,0,6"/><TextBox Name="StartBox" Height="35" Padding="9,6" Background="#0A0F13" Foreground="White" BorderBrush="#35424C"/></StackPanel>
    <StackPanel Grid.Row="1" Grid.Column="2"><TextBlock Text="퇴근 시각" Margin="0,12,0,6"/><TextBox Name="EndBox" Height="35" Padding="9,6" Background="#0A0F13" Foreground="White" BorderBrush="#35424C"/></StackPanel>
    <StackPanel Grid.Row="2"><TextBlock Text="휴게 시작" Margin="0,12,0,6"/><TextBox Name="BreakStartBox" Height="35" Padding="9,6" Background="#0A0F13" Foreground="White" BorderBrush="#35424C"/></StackPanel>
    <StackPanel Grid.Row="2" Grid.Column="2"><TextBlock Text="휴게 종료" Margin="0,12,0,6"/><TextBox Name="BreakEndBox" Height="35" Padding="9,6" Background="#0A0F13" Foreground="White" BorderBrush="#35424C"/></StackPanel>
+   <StackPanel Grid.Row="3" Grid.ColumnSpan="3" Margin="0,15,0,0"><TextBlock Text="출근 요일" Margin="0,0,0,8"/><UniformGrid Columns="5"><CheckBox Name="MondayBox" Content="월"/><CheckBox Name="TuesdayBox" Content="화"/><CheckBox Name="WednesdayBox" Content="수"/><CheckBox Name="ThursdayBox" Content="목"/><CheckBox Name="FridayBox" Content="금"/></UniformGrid></StackPanel>
+   <StackPanel Grid.Row="4" Grid.ColumnSpan="3" Margin="0,15,0,0"><TextBlock Text="이번 달 실제 출근 예정일 (선택)" Margin="0,0,0,6"/><TextBox Name="MonthlyWorkdaysBox" Height="35" Padding="9,6" Background="#0A0F13" Foreground="White" BorderBrush="#35424C"/><TextBlock Text="비워두면 선택한 요일로 자동 계산합니다." Foreground="#71808A" FontSize="10" Margin="0,4,0,0"/></StackPanel>
   </Grid>
   <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0"><Button Name="CancelButton" Content="취소" Width="76" Height="36" Margin="0,0,8,0"/><Button Name="SaveButton" Content="저장" Width="76" Height="36" Background="#6EE7A8" Foreground="#062013" FontWeight="Bold"/></StackPanel>
  </Grid>
 </Window>
 '@
   $r = New-Object System.Xml.XmlNodeReader $settingsXaml; $dialog = [Windows.Markup.XamlReader]::Load($r); $dialog.Owner = $window
-  $hourlyBox=$dialog.FindName('HourlyBox');$startBox=$dialog.FindName('StartBox');$endBox=$dialog.FindName('EndBox');$breakStartBox=$dialog.FindName('BreakStartBox');$breakEndBox=$dialog.FindName('BreakEndBox')
+  $hourlyBox=$dialog.FindName('HourlyBox');$startBox=$dialog.FindName('StartBox');$endBox=$dialog.FindName('EndBox');$breakStartBox=$dialog.FindName('BreakStartBox');$breakEndBox=$dialog.FindName('BreakEndBox');$monthlyWorkdaysBox=$dialog.FindName('MonthlyWorkdaysBox')
   $hourlyBox.Text=$script:config.Hourly;$startBox.Text=$script:config.Start;$endBox.Text=$script:config.End;$breakStartBox.Text=$script:config.BreakStart;$breakEndBox.Text=$script:config.BreakEnd
+  $dayBoxes=[ordered]@{Monday=$dialog.FindName('MondayBox');Tuesday=$dialog.FindName('TuesdayBox');Wednesday=$dialog.FindName('WednesdayBox');Thursday=$dialog.FindName('ThursdayBox');Friday=$dialog.FindName('FridayBox')}; $selectedDays=@($script:config.WorkDays -split ','); foreach($day in $dayBoxes.Keys){$dayBoxes[$day].IsChecked=($selectedDays -contains $day)}
+  $monthlyWorkdaysBox.Text = if($script:config.MonthlyWorkdaysMonth -eq (Get-Date).ToString('yyyy-MM')){"$($script:config.MonthlyWorkdays)"}else{''}
   $dialog.FindName('CancelButton').Add_Click({$dialog.DialogResult=$false;$dialog.Close()})
   $dialog.FindName('SaveButton').Add_Click({
     $hourly=0; $validHourly=[int]::TryParse($hourlyBox.Text,[ref]$hourly); $timePattern='^([01]\d|2[0-3]):[0-5]\d$'
     if(!$validHourly -or $hourly -le 0 -or $startBox.Text -notmatch $timePattern -or $endBox.Text -notmatch $timePattern -or $breakStartBox.Text -notmatch $timePattern -or $breakEndBox.Text -notmatch $timePattern){[Windows.MessageBox]::Show('시급과 시간을 확인해 주세요. 시간은 09:30 형식으로 입력합니다.','입력 확인')|Out-Null;return}
     if((Minutes $endBox.Text) -le (Minutes $startBox.Text) -or (Minutes $breakEndBox.Text) -le (Minutes $breakStartBox.Text)){[Windows.MessageBox]::Show('종료 시각은 시작 시각보다 늦어야 합니다.','입력 확인')|Out-Null;return}
-    $script:config.Hourly=$hourly;$script:config.Start=$startBox.Text;$script:config.End=$endBox.Text;$script:config.BreakStart=$breakStartBox.Text;$script:config.BreakEnd=$breakEndBox.Text;Save-Config;$script:previousMoney='';$script:lastDisplaySecond='';Refresh-UI;$dialog.DialogResult=$true;$dialog.Close()
+    $chosen=@($dayBoxes.Keys | Where-Object {$dayBoxes[$_].IsChecked -eq $true}); if($chosen.Count -eq 0){[Windows.MessageBox]::Show('출근 요일을 하나 이상 선택해 주세요.','입력 확인')|Out-Null;return}
+    $manualDays=$monthlyWorkdaysBox.Text.Trim(); if($manualDays -ne '' -and ($manualDays -notmatch '^\d+$' -or [int]$manualDays -gt 31)){[Windows.MessageBox]::Show('이번 달 출근일은 0~31 사이 숫자로 입력하거나 비워 주세요.','입력 확인')|Out-Null;return}
+    $script:config.Hourly=$hourly;$script:config.Start=$startBox.Text;$script:config.End=$endBox.Text;$script:config.BreakStart=$breakStartBox.Text;$script:config.BreakEnd=$breakEndBox.Text;$script:config.WorkDays=($chosen -join ',');$script:config.MonthlyWorkdays=$manualDays;$script:config.MonthlyWorkdaysMonth=if($manualDays -ne ''){(Get-Date).ToString('yyyy-MM')}else{''};Save-Config;$script:previousMoney='';$script:previousMonthly='';$script:lastDisplaySecond='';Refresh-UI;$dialog.DialogResult=$true;$dialog.Close()
   })
   $dialog.ShowDialog() | Out-Null
 }
